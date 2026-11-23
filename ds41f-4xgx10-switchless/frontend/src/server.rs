@@ -108,7 +108,7 @@ impl App {
         }
     }
 
-    fn random_hex(&self, n: usize) -> String {
+    pub(crate) fn random_hex(&self, n: usize) -> String {
         // splitmix64 over time and a counter: ids only need to be unique
         let mut x = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
             ^ self.counter.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E3779B97F4A7C15);
@@ -128,7 +128,8 @@ impl App {
 
 pub fn router(app: Arc<App>) -> Router {
     let max_body = app.cfg.max_body_bytes;
-    let routes = Router::new().route("/health", get(health)).route("/v1/models", get(models)).route("/v1/chat/completions", post(chat));
+    let routes = Router::new().route("/health", get(health)).route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat)).route("/v1/messages", post(crate::anthropic::messages));
     body_limit(routes, max_body).with_state(app)
 }
 
@@ -147,9 +148,12 @@ fn error(status: StatusCode, kind: &str, msg: impl Into<String>) -> Response {
 
 /// A request's failure: its status, error type and message. The answer, or once a stream has started
 /// (a stream that waited at the gate), its error event.
-struct ApiError(StatusCode, String, String);
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String, pub(crate) String);
 
 impl ApiError {
+    pub(crate) fn parts(&self) -> (StatusCode, String, String) {
+        (self.0.clone(), self.1.clone(), self.2.clone())
+    }
     fn json(&self) -> Value {
         json!({"error": {"message": self.2, "type": self.1, "param": null, "code": self.0.as_u16()}})
     }
@@ -212,13 +216,13 @@ pub(crate) fn hold_image_rows(cfg: &ServerConfig, budget: &Arc<crate::vision::Ro
 
 /// A stream that waits for the engine carries an SSE comment this often, so that a client's idle
 /// timeout sees bytes (and so does a long prefill's wait for its first token).
-const KEEP_ALIVE: Duration = Duration::from_secs(5);
+pub(crate) const KEEP_ALIVE: Duration = Duration::from_secs(5);
 
 fn bad_request(msg: impl Into<String>) -> Response {
     error(StatusCode::BAD_REQUEST, "invalid_request_error", msg)
 }
 
-fn check_auth(app: &App, headers: &HeaderMap) -> Result<(), Response> {
+pub(crate) fn check_auth(app: &App, headers: &HeaderMap) -> Result<(), Response> {
     let Some(key) = &app.cfg.api_key else { return Ok(()) };
     let got = headers
         .get("authorization")
@@ -613,14 +617,14 @@ pub fn prepare(cfg: &ServerConfig, req: &Value) -> Result<Prepared, String> {
 // ------------------------------------------------------------------ generation
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Finish {
+pub(crate) enum Finish {
     Stop,
     Length,
     ToolCalls,
 }
 
 impl Finish {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Finish::Stop => "stop",
             Finish::Length => "length",
@@ -629,11 +633,11 @@ impl Finish {
     }
 }
 
-struct Usage {
-    prompt: usize,
-    cached: u32,
-    completion: usize,
-    reasoning: usize,
+pub(crate) struct Usage {
+    pub(crate) prompt: usize,
+    pub(crate) cached: u32,
+    pub(crate) completion: usize,
+    pub(crate) reasoning: usize,
 }
 
 impl Usage {
@@ -646,7 +650,7 @@ impl Usage {
 }
 
 /// One request in flight on the engine: decodes, stops, guards and parses its token stream.
-struct Gen {
+pub(crate) struct Gen {
     app: Arc<App>,
     /// counts the request in flight at the gate until it ends (or its client goes away)
     _pass: Pass,
@@ -674,7 +678,7 @@ struct Gen {
 impl Gen {
     /// Feed engine events until something can be sent. Returns the deltas and, at the end, the
     /// finish reason and usage.
-    async fn next(&mut self, out: &mut Vec<Delta>) -> Option<Result<(Finish, Usage), String>> {
+    pub(crate) async fn next(&mut self, out: &mut Vec<Delta>) -> Option<Result<(Finish, Usage), String>> {
         loop {
             let ev = match self.rx.recv().await {
                 Some(ev) => ev,
@@ -807,7 +811,7 @@ impl Drop for Gen {
     }
 }
 
-async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError> {
+pub(crate) async fn start(app: &Arc<App>, p: &Prepared, pass: Pass) -> Result<Gen, ApiError> {
     let unavailable = |msg: String| ApiError(StatusCode::SERVICE_UNAVAILABLE, "server_error".into(), msg);
     let Some(info) = app.engine.info() else {
         return Err(unavailable("engine not connected".into()));

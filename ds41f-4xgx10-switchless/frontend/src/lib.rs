@@ -1,5 +1,6 @@
 //! dsgb10 front-end: tokeniser, chat encoding, OpenAI-compatible server and the rank-0 protocol.
 
+pub mod anthropic;
 pub mod encoding;
 pub mod engine;
 pub mod gate;
